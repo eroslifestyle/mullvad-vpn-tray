@@ -1,4 +1,4 @@
-import gi, json, logging, os, random, socket, subprocess, threading
+import gi, json, locale as locale_mod, logging, os, random, socket, subprocess, threading
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("vpn-tray")
 gi.require_version("Gtk", "3.0")
@@ -14,12 +14,125 @@ from gi.repository import Gtk, GLib, WebKit2
 ICON_ON = "security-high-symbolic"
 ICON_OFF = "security-low-symbolic"
 POLL_SECONDS = 8
-CONFIG_PATH = "/mnt/backup/Dropbox/1 Programmazione/Progetti/vpn-tray/config.json"
-INTERVALS = [("Disattivata", 0), ("15 minuti", 15), ("30 minuti", 30), ("1 ora", 60), ("6 ore", 360), ("1 giorno", 1440), ("1 settimana", 10080)]
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
+# ─── i18n ────────────────────────────────────────────────────────────────────
+
+I18N = {
+    "en": {
+        "interval_disabled": "Disabled",
+        "interval_15m": "15 minutes",
+        "interval_30m": "30 minutes",
+        "interval_1h": "1 hour",
+        "interval_6h": "6 hours",
+        "interval_1d": "1 day",
+        "interval_1w": "1 week",
+        "tray_title": "Mullvad VPN",
+        "status_off": "🔓 VPN disabled (real IP)",
+        "status_on": "🔒 {} / {}",
+        "status_auto": " · auto {}",
+        "menu_off": "Disable VPN",
+        "menu_random": "🎲 Random node (world)",
+        "menu_fast": "⚡ Fast random (top nodes)",
+        "menu_choose": "🌍 Choose node…",
+        "menu_rotation": "🔁 Auto-rotation",
+        "menu_country_lock": "Stay in current country",
+        "menu_refresh": "↻ Refresh node list",
+        "menu_quit": "Quit",
+        "picker_title": "Choose VPN node",
+        "picker_search": "Search country, city or server…",
+        "picker_legend": "★ = Mullvad quality (higher = recommended). Best nodes on top.",
+        "picker_active": "✓",
+        "picker_no_vpn": "🔓 No VPN active",
+    },
+    "it": {
+        "interval_disabled": "Disattivata",
+        "interval_15m": "15 minuti",
+        "interval_30m": "30 minuti",
+        "interval_1h": "1 ora",
+        "interval_6h": "6 ore",
+        "interval_1d": "1 giorno",
+        "interval_1w": "1 settimana",
+        "tray_title": "Mullvad VPN",
+        "status_off": "🔓 VPN disattivata (IP reale)",
+        "status_on": "🔒 {} / {}",
+        "status_auto": " · auto {}",
+        "menu_off": "Disattiva VPN",
+        "menu_random": "🎲 Nodo casuale (mondo)",
+        "menu_fast": "⚡ Random veloce (top nodi)",
+        "menu_choose": "🌍 Scegli nodo…",
+        "menu_rotation": "🔁 Rotazione automatica",
+        "menu_country_lock": "Resta nel paese attuale",
+        "menu_refresh": "↻ Aggiorna lista nodi",
+        "menu_quit": "Esci",
+        "picker_title": "Scegli nodo VPN",
+        "picker_search": "Cerca paese, città o server…",
+        "picker_legend": "★ = qualità Mullvad (più alto = consigliato). Nodi migliori in cima.",
+        "picker_active": "✓",
+        "picker_no_vpn": "🔓 Nessuna VPN attiva",
+    }
+}
+
+INTERVALS = [
+    ("interval_disabled", 0),
+    ("interval_15m", 15),
+    ("interval_30m", 30),
+    ("interval_1h", 60),
+    ("interval_6h", 360),
+    ("interval_1d", 1440),
+    ("interval_1w", 10080),
+]
+
+
+def _detect_lang():
+    cfg = {}
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        pass
+    if cfg.get("lang") in ("en", "it"):
+        return cfg["lang"]
+    lang = os.environ.get("LANG", "") or os.environ.get("LC_ALL", "")
+    if lang.startswith("it"):
+        return "it"
+    return "en"
+
+
+_LANG = _detect_lang()
+
+
+def t(key):
+    return I18N[_LANG].get(key, I18N["en"].get(key, key))
+
+
+# ─── Config helpers ───────────────────────────────────────────────────────────
+
+def load_config():
+    cfg = {"interval_min": 0, "country_lock": False, "lang": _LANG}
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "r") as f:
+            loaded = json.load(f)
+            cfg.update(loaded)
+    except Exception:
+        logger.warning("load_config failed, using defaults", exc_info=True)
+    return cfg
+
+
+def save_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        logger.warning("save_config failed", exc_info=True)
+
+
+# ─── Tailscale helpers ───────────────────────────────────────────────────────
 
 def sd_notify(state):
-    """Manda un messaggio a systemd (es. 'WATCHDOG=1'). No-op fuori da systemd."""
     addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
         return
@@ -32,25 +145,6 @@ def sd_notify(state):
         s.close()
     except Exception:
         logger.warning("systemd watchdog failed", exc_info=True)
-
-
-def load_config():
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
-    except Exception:
-        logger.warning("load_config failed, using defaults", exc_info=True)
-        return {"interval_min": 0, "country_lock": False}
-
-
-def save_config(cfg):
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(cfg, f)
-    except Exception:
-        logger.warning("save_config failed", exc_info=True)
 
 
 def ts_status_peers():
@@ -66,22 +160,22 @@ def ts_status_peers():
         return []
 
 
+def _get_ipv4(ts_ips):
+    for ip in ts_ips:
+        if ":" not in ip:
+            return ip
+    return ts_ips[0] if ts_ips else ""
+
+
 def list_nodes():
     try:
-        peers = ts_status_peers()
         nodes = []
-        for p in peers:
+        for p in ts_status_peers():
             loc = p.get("Location", {})
             if not loc:
                 continue
             ts_ips = p.get("TailscaleIPs", [])
-            ip = ""
-            for ip_candidate in ts_ips:
-                if ":" not in ip_candidate:
-                    ip = ip_candidate
-                    break
-            if not ip and ts_ips:
-                ip = ts_ips[0]
+            ip = _get_ipv4(ts_ips)
             nodes.append({
                 "host": p.get("HostName", ""),
                 "ip": ip,
@@ -108,18 +202,11 @@ def current_node():
             if p.get("ExitNode"):
                 loc = p.get("Location", {})
                 ts_ips = p.get("TailscaleIPs", [])
-                ip = ""
-                for ip_candidate in ts_ips:
-                    if ":" not in ip_candidate:
-                        ip = ip_candidate
-                        break
-                if not ip and ts_ips:
-                    ip = ts_ips[0]
                 return {
                     "country": loc.get("Country", ""),
                     "country_code": loc.get("CountryCode", ""),
                     "city": loc.get("City", ""),
-                    "ip": ip,
+                    "ip": _get_ipv4(ts_ips),
                     "host": p.get("HostName", "")
                 }
         return None
@@ -148,13 +235,15 @@ def clear_node():
         logger.error("clear_node failed", exc_info=True)
 
 
+# ─── Main class ───────────────────────────────────────────────────────────────
+
 class VpnTray:
     def __init__(self):
         self.ind = AppIndicator.Indicator.new(
             "vpn-toggle", ICON_OFF, AppIndicator.IndicatorCategory.SYSTEM_SERVICES
         )
         self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-        self.ind.set_title("VPN Mullvad")
+        self.ind.set_title(t("tray_title"))
 
         self.cfg = load_config()
         self.nodes = list_nodes()
@@ -163,28 +252,23 @@ class VpnTray:
 
         self.build_menu()
         self.refresh()
-        # Retry popolamento nodi: al boot Tailscale può non aver ancora risposto con i peer.
-        # Il primo refresh_nodes(2s) ricostruisce il menu appena la lista arriva.
         GLib.timeout_add_seconds(2, self._initial_nodes_refresh)
         GLib.timeout_add_seconds(POLL_SECONDS, self._tick)
 
-        # Watchdog systemd: battito periodico; se l'app si freeza, systemd la riavvia.
         sd_notify("WATCHDOG=1")
         GLib.timeout_add_seconds(15, self._watchdog)
 
         if self.cfg["interval_min"] > 0:
             self.apply_rotation()
 
-
     def _watchdog(self):
         sd_notify("WATCHDOG=1")
         return True
 
     def _initial_nodes_refresh(self):
-        # Eseguito 2s dopo il boot: ripopola la lista nodi se Tailscale non era ancora pronto.
         self.nodes = list_nodes()
         self.build_menu()
-        return False  # one-shot
+        return False
 
     def build_menu(self):
         self._building = True
@@ -195,35 +279,32 @@ class VpnTray:
         self.item_status.set_sensitive(False)
         self.menu.append(self.item_status)
 
-        item_off = Gtk.MenuItem(label="Disattiva VPN")
+        item_off = Gtk.MenuItem(label=t("menu_off"))
         item_off.connect("activate", self.on_off)
         self.menu.append(item_off)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        item_random = Gtk.MenuItem(label="🎲 Nodo casuale (mondo)")
+        item_random = Gtk.MenuItem(label=t("menu_random"))
         item_random.connect("activate", self.on_random)
         self.menu.append(item_random)
 
-        item_fast = Gtk.MenuItem(label="⚡ Random veloce (top nodi)")
+        item_fast = Gtk.MenuItem(label=t("menu_fast"))
         item_fast.connect("activate", self.on_random_fast)
         self.menu.append(item_fast)
 
-        # Selezione nodo via FINESTRA, non submenu: ubuntu-appindicators regge
-        # solo 1 livello di submenu con voci foglia. 530 nodi in submenu annidati
-        # (paese→città) non si aprono. Una finestra Gtk con ricerca non ha limiti.
-        item_choose = Gtk.MenuItem(label="🌍 Scegli nodo…")
+        item_choose = Gtk.MenuItem(label=t("menu_choose"))
         item_choose.connect("activate", self.on_choose_node)
         self.menu.append(item_choose)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
         rot_menu = Gtk.Menu()
-        item_rot = Gtk.MenuItem(label="🔁 Rotazione automatica")
+        item_rot = Gtk.MenuItem(label=t("menu_rotation"))
         item_rot.set_submenu(rot_menu)
 
-        for label, minutes in INTERVALS:
-            item = Gtk.CheckMenuItem(label=label)
+        for key, minutes in INTERVALS:
+            item = Gtk.CheckMenuItem(label=t(key))
             item.set_draw_as_radio(True)
             item.set_active(minutes == self.cfg["interval_min"])
             item.connect("activate", lambda _, m=minutes: self.set_interval(m))
@@ -231,7 +312,7 @@ class VpnTray:
 
         rot_menu.append(Gtk.SeparatorMenuItem())
 
-        item_lock = Gtk.CheckMenuItem(label="Resta nel paese attuale")
+        item_lock = Gtk.CheckMenuItem(label=t("menu_country_lock"))
         item_lock.set_active(self.cfg["country_lock"])
         item_lock.connect("toggled", self.toggle_country_lock)
         rot_menu.append(item_lock)
@@ -239,18 +320,17 @@ class VpnTray:
         self.menu.append(item_rot)
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        item_refresh = Gtk.MenuItem(label="↻ Aggiorna lista nodi")
+        item_refresh = Gtk.MenuItem(label=t("menu_refresh"))
         item_refresh.connect("activate", self.on_refresh_nodes)
         self.menu.append(item_refresh)
 
-        item_quit = Gtk.MenuItem(label="Esci")
+        item_quit = Gtk.MenuItem(label=t("menu_quit"))
         item_quit.connect("activate", lambda *_: Gtk.main_quit())
         self.menu.append(item_quit)
 
         self.menu.show_all()
         self.ind.set_menu(self.menu)
         self._building = False
-
 
     def _do_connect(self, ip):
         set_node(ip)
@@ -259,19 +339,19 @@ class VpnTray:
     def refresh(self):
         cur = current_node()
         on = cur is not None
-        tooltip = "VPN Mullvad"
+        tooltip = t("tray_title")
         if on:
             self.ind.set_icon_full(ICON_ON, tooltip)
-            label = "🔒 {} / {}".format(cur["country"], cur["city"])
+            label = t("status_on").format(cur["country"], cur["city"])
             if self.cfg["interval_min"] > 0:
-                for lbl, mins in INTERVALS:
+                for key, mins in INTERVALS:
                     if mins == self.cfg["interval_min"]:
-                        label += " · auto {}".format(lbl)
+                        label += t("status_auto").format(t(key))
                         break
             self.item_status.set_label(label)
         else:
             self.ind.set_icon_full(ICON_OFF, tooltip)
-            self.item_status.set_label("🔓 VPN disattivata (IP reale)")
+            self.item_status.set_label(t("status_off"))
 
     def on_off(self, _):
         threading.Thread(target=self._do_off, daemon=True).start()
@@ -287,8 +367,6 @@ class VpnTray:
         self.connect_to(ip)
 
     def on_random_fast(self, _):
-        # Random tra i nodi con Priority Mullvad più alta (top 10%, min 10).
-        # Priority alta = server consigliati Mullvad (capienti/stabili).
         if not self.nodes:
             return
         ranked = sorted(self.nodes, key=lambda n: n.get("priority", 0), reverse=True)
@@ -300,14 +378,11 @@ class VpnTray:
         threading.Thread(target=self._do_connect, args=(ip,), daemon=True).start()
 
     def on_choose_node(self, _):
-        # Popup HTML (WebKit) con paesi a tendina, città come sotto-voci e
-        # ricerca live. Sostituisce i submenu del tray che ubuntu-appindicators
-        # non renderizza con 530 nodi.
         if getattr(self, "_chooser", None):
             self._chooser.present()
             return
 
-        win = Gtk.Window(title="Scegli nodo VPN")
+        win = Gtk.Window(title=t("picker_title"))
         win.set_default_size(440, 620)
         win.set_keep_above(True)
         self._chooser = win
@@ -320,10 +395,7 @@ class VpnTray:
         webview.load_html(self._chooser_html(), "file:///")
         win.add(webview)
 
-        def on_destroy(*_):
-            self._chooser = None
-
-        win.connect("destroy", on_destroy)
+        win.connect("destroy", lambda *_: setattr(self, "_chooser", None))
         win.show_all()
         win.present()
 
@@ -334,12 +406,12 @@ class VpnTray:
             ip = ""
         if ip:
             self.connect_to(ip)
-        if getattr(self, "_chooser", None):
-            self._chooser.destroy()
+        chooser = getattr(self, "_chooser", None)
+        if chooser:
+            chooser.destroy()
 
     @staticmethod
     def _flag(country_code):
-        # ISO-3166 alpha-2 → emoji bandiera (regional indicator symbols).
         cc = (country_code or "").upper()
         if len(cc) != 2 or not cc.isalpha():
             return "🌍"
@@ -360,7 +432,6 @@ class VpnTray:
             for n in group:
                 city_count[n["city"]] = city_count.get(n["city"], 0) + 1
 
-            # Nodi migliori (Priority Mullvad più alta) in cima, poi per città.
             group = sorted(group, key=lambda n: (-n.get("priority", 0), n["city"]))
 
             cities_html = []
@@ -368,7 +439,7 @@ class VpnTray:
                 city = n["city"]
                 label = city if city_count[city] == 1 else "{} · {}".format(city, n["host"])
                 active = " active" if n["ip"] == cur_ip else ""
-                check = " ✓" if n["ip"] == cur_ip else ""
+                check = " " + t("picker_active") if n["ip"] == cur_ip else ""
                 prio = n.get("priority", 0)
                 badge = '<span class="prio">★{}</span>'.format(prio) if prio else ""
                 cities_html.append(
@@ -394,33 +465,25 @@ class VpnTray:
             cur_label = "🔒 {} {} / {}".format(
                 self._flag(cur.get("country_code", "")), cur["country"], cur["city"])
         else:
-            cur_label = "🔓 Nessuna VPN attiva"
+            cur_label = t("picker_no_vpn")
 
         return """<!doctype html><html><head><meta charset="utf-8"><style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ font-family: system-ui, sans-serif; background: #1e1e2e; color: #cdd6f4;
-       font-size: 14px; }}
-.top {{ position: sticky; top: 0; background: #181825; padding: 12px;
-        border-bottom: 1px solid #313244; z-index: 10; }}
+body {{ font-family: system-ui, sans-serif; background: #1e1e2e; color: #cdd6f4; font-size: 14px; }}
+.top {{ position: sticky; top: 0; background: #181825; padding: 12px; border-bottom: 1px solid #313244; z-index: 10; }}
 .status {{ font-size: 13px; color: #a6e3a1; margin-bottom: 8px; }}
-#q {{ width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid #313244;
-      background: #313244; color: #cdd6f4; font-size: 14px; outline: none; }}
+#q {{ width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid #313244; background: #313244; color: #cdd6f4; font-size: 14px; outline: none; }}
 #q:focus {{ border-color: #89b4fa; }}
 .legend {{ font-size: 11px; color: #7f849c; margin-top: 8px; }}
 .list {{ padding: 6px 8px 16px; }}
-details.country {{ margin: 3px 0; border-radius: 8px; overflow: hidden;
-                   background: #24273a; }}
-summary {{ padding: 10px 12px; cursor: pointer; font-weight: 600; list-style: none;
-           display: flex; justify-content: space-between; align-items: center; }}
+details.country {{ margin: 3px 0; border-radius: 8px; overflow: hidden; background: #24273a; }}
+summary {{ padding: 10px 12px; cursor: pointer; font-weight: 600; list-style: none; display: flex; justify-content: space-between; align-items: center; }}
 summary::-webkit-details-marker {{ display: none; }}
 summary:hover {{ background: #313244; }}
-.cnt {{ font-size: 11px; color: #7f849c; background: #181825; padding: 1px 8px;
-        border-radius: 10px; }}
+.cnt {{ font-size: 11px; color: #7f849c; background: #181825; padding: 1px 8px; border-radius: 10px; }}
 .flag {{ font-size: 16px; }}
 summary > span:nth-child(1) {{ margin-right: 4px; }}
-.city {{ padding: 8px 12px 8px 28px; cursor: pointer; border-top: 1px solid #313244;
-         font-size: 13px; display: flex; justify-content: space-between;
-         align-items: center; }}
+.city {{ padding: 8px 12px 8px 28px; cursor: pointer; border-top: 1px solid #313244; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }}
 .city:hover {{ background: #45475a; }}
 .city.active {{ color: #a6e3a1; font-weight: 600; }}
 .prio {{ font-size: 11px; color: #f9e2af; margin-left: 8px; white-space: nowrap; }}
@@ -428,8 +491,8 @@ summary > span:nth-child(1) {{ margin-right: 4px; }}
 </style></head><body>
 <div class="top">
   <div class="status">{cur_label}</div>
-  <input id="q" placeholder="Cerca paese, città o server…" autofocus>
-  <div class="legend">★ = qualità Mullvad (più alto = consigliato). Nodi migliori in cima.</div>
+  <input id="q" placeholder="{search}" autofocus>
+  <div class="legend">{legend}</div>
 </div>
 <div class="list" id="list">{rows}</div>
 <script>
@@ -450,7 +513,8 @@ q.addEventListener('input', () => {{
     if (!s) d.open = d.querySelector('.city.active') !== null;
   }});
 }});
-</script></body></html>""".format(cur_label=cur_label, rows="".join(rows))
+</script></body></html>""".format(
+            cur_label=cur_label, search=t("picker_search"), legend=t("picker_legend"), rows="".join(rows))
 
     def after_change(self):
         self.refresh()
@@ -458,9 +522,6 @@ q.addEventListener('input', () => {{
         return False
 
     def _tick(self):
-        # Rinfresca la lista nodi: l'utente può aggiungere/rimuovere exit-node
-        # da Tailscale, e dopo lo spostamento del progetto il service partiva
-        # con la cache vuota.
         fresh = list_nodes()
         if [n["ip"] for n in fresh] != [n["ip"] for n in self.nodes]:
             self.nodes = fresh
@@ -492,7 +553,6 @@ q.addEventListener('input', () => {{
         if self.rotate_source:
             GLib.source_remove(self.rotate_source)
             self.rotate_source = None
-
         if self.cfg["interval_min"] > 0:
             self.rotate_source = GLib.timeout_add_seconds(
                 self.cfg["interval_min"] * 60, self.on_rotate
@@ -501,22 +561,16 @@ q.addEventListener('input', () => {{
     def on_rotate(self):
         cur = current_node()
         pool = self.nodes
-
         if self.cfg["country_lock"] and cur:
             pool = [n for n in self.nodes if n["country"] == cur["country"]]
-
         if not pool:
             return True
-
-        # Ruota solo tra i nodi più performanti (top 10% per Priority, min 10).
         ranked = sorted(pool, key=lambda n: n.get("priority", 0), reverse=True)
         pool = ranked[:max(10, len(ranked) // 10)]
-
         cur_ip = cur["ip"] if cur else None
         candidates = [n for n in pool if n["ip"] != cur_ip]
         if not candidates:
             candidates = pool
-
         ip = random.choice(candidates)["ip"]
         self.connect_to(ip)
         return True
