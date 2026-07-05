@@ -39,6 +39,9 @@ I18N = {
         "menu_country_lock": "Stay in current country",
         "menu_refresh": "↻ Refresh node list",
         "menu_quit": "Quit",
+        "menu_lang": "🌐 Language",
+        "lang_en": "English",
+        "lang_it": "Italiano",
         "picker_title": "Choose VPN node",
         "picker_search": "Search country, city or server…",
         "picker_legend": "★ = Mullvad quality (higher = recommended). Best nodes on top.",
@@ -65,6 +68,9 @@ I18N = {
         "menu_country_lock": "Resta nel paese attuale",
         "menu_refresh": "↻ Aggiorna lista nodi",
         "menu_quit": "Esci",
+        "menu_lang": "🌐 Lingua",
+        "lang_en": "English",
+        "lang_it": "Italiano",
         "picker_title": "Scegli nodo VPN",
         "picker_search": "Cerca paese, città o server…",
         "picker_legend": "★ = qualità Mullvad (più alto = consigliato). Nodi migliori in cima.",
@@ -579,3 +585,51 @@ q.addEventListener('input', () => {{
 if __name__ == "__main__":
     VpnTray()
     Gtk.main()
+
+# ─── Language switcher (added) ───────────────────────────────────────────────
+
+def set_lang(lang):
+    """Switch language at runtime."""
+    global _LANG
+    _LANG = lang
+    cfg = load_config()
+    cfg["lang"] = lang
+    save_config(cfg)
+
+# Monkey-patch build_menu to add language submenu
+_orig_build_menu = VpnTray.build_menu
+
+def _patched_build_menu(self):
+    _orig_build_menu(self)
+    # Add language switcher near the bottom (before Quit)
+    # Find the item_quit position and insert before it
+    for i, child in enumerate(self.menu.get_children()):
+        if hasattr(child, 'get_label') and child.get_label() in (t("menu_quit"), "Esci", "Quit"):
+            # Insert language menu before Quit
+            lang_menu = Gtk.Menu()
+            item_lang = Gtk.MenuItem(label=t("menu_lang"))
+            item_lang.set_submenu(lang_menu)
+
+            item_lang_en = Gtk.CheckMenuItem(label=t("lang_en"))
+            item_lang_en.set_draw_as_radio(True)
+            item_lang_en.set_active(_LANG == "en")
+            item_lang_en.connect("activate", lambda _: _switch_lang("en"))
+            lang_menu.append(item_lang_en)
+
+            item_lang_it = Gtk.CheckMenuItem(label=t("lang_it"))
+            item_lang_it.set_draw_as_radio(True)
+            item_lang_it.set_active(_LANG == "it")
+            item_lang_it.connect("activate", lambda _: _switch_lang("it"))
+            lang_menu.append(item_lang_it)
+
+            self.menu.insert(item_lang, i)
+            sep = Gtk.SeparatorMenuItem()
+            self.menu.insert(sep, i + 1)
+            self.menu.show_all()
+            break
+
+def _switch_lang(lang):
+    set_lang(lang)
+    GLib.idle_add(lambda: (_patched_build_menu(VpnTray()), VpnTray.refresh(VpnTray()), False)[1])
+
+VpnTray.build_menu = _patched_build_menu
