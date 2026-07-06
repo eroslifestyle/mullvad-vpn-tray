@@ -547,6 +547,69 @@ q.addEventListener('input', () => {{
         self.build_menu()
         return False
 
+    def _tick(self):
+        fresh = list_nodes()
+        if [n["ip"] for n in fresh] != [n["ip"] for n in self.nodes]:
+            self.nodes = fresh
+            self.build_menu()
+        self.refresh()
+        return True
+
+    def on_refresh_nodes(self, _):
+        self.nodes = list_nodes()
+        self.build_menu()
+        self.refresh()
+
+    def set_interval(self, m):
+        if self._building:
+            return
+        self.cfg["interval_min"] = m
+        save_config(self.cfg)
+        self.apply_rotation()
+        if m > 0:
+            self.on_rotate()
+        self.build_menu()
+        self.refresh()
+
+    def toggle_country_lock(self, item):
+        self.cfg["country_lock"] = item.get_active()
+        save_config(self.cfg)
+
+    def set_lang(self, lang):
+        """Switch UI language at runtime."""
+        global _LANG
+        _LANG = lang
+        self.cfg["lang"] = lang
+        save_config(self.cfg)
+        self.build_menu()
+        self.refresh()
+
+    def apply_rotation(self):
+        if self.rotate_source:
+            GLib.source_remove(self.rotate_source)
+            self.rotate_source = None
+        if self.cfg["interval_min"] > 0:
+            self.rotate_source = GLib.timeout_add_seconds(
+                self.cfg["interval_min"] * 60, self.on_rotate
+            )
+
+    def on_rotate(self):
+        cur = current_node()
+        pool = self.nodes
+        if self.cfg["country_lock"] and cur:
+            pool = [n for n in self.nodes if n["country"] == cur["country"]]
+        if not pool:
+            return True
+        ranked = sorted(pool, key=lambda n: n.get("priority", 0), reverse=True)
+        pool = ranked[:max(10, len(ranked) // 10)]
+        cur_ip = cur["ip"] if cur else None
+        candidates = [n for n in pool if n["ip"] != cur_ip]
+        if not candidates:
+            candidates = pool
+        ip = random.choice(candidates)["ip"]
+        self.connect_to(ip)
+        return True
+
 
 if __name__ == "__main__":
     VpnTray()
